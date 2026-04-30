@@ -1,34 +1,35 @@
 import streamlit as st
 import pandas as pd
-import os
-import shutil
 from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
+from streamlit_gsheets import GSheetsConnection
 
 # --- App Configuration & Roster ---
 st.set_page_config(page_title="MLB The Show 26 Tracker", layout="wide")
 st.title("⚾ MLB The Show 26 Co-op Tracker")
 
-# THE OFFICIAL LEAGUE ROSTER
 ROSTER = ["Ernest", "Landon", "Caleb", "Roman", "Troy"]
 
-DATA_FILE = "mlb_show_stats.csv"
+# THE CLOUD DATABASE URL
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1UGpd4zr-zMSNdfS7Ap8WTmhvm21mg56-5VRoQOdyAWg/edit?usp=drive_web"
+
+# Create the Google Sheets Connection
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 # --- Data Management ---
 def load_data():
-    if os.path.exists(DATA_FILE):
-        df = pd.read_csv(DATA_FILE)
-        
-        if 'Date' not in df.columns:
-            df.insert(0, 'Date', "Legacy Record")
-            
-        if not df.empty:
-            df['Game WAR'] = (df['Hits'] * 0.5) + (df['TB'] * 0.25) + (df['Walks'] * 0.5) + (df['RBIs'] * 1.0) - (df['ERA_Plus'] * 0.5)
-        return df
-    else:
+    # ttl=0 ensures the app always fetches the freshest live data
+    df = conn.read(spreadsheet=SHEET_URL, ttl=0)
+    
+    # If the sheet is completely blank, build the columns
+    if df.empty or 'Player' not in df.columns:
         cols = ["Date", "Player", "Hits", "Walks", "RBIs", "HR", "xBH", "TB", "ERA_Plus"]
         return pd.DataFrame(columns=cols)
+        
+    # Calculate Game WAR globally
+    df['Game WAR'] = (df['Hits'] * 0.5) + (df['TB'] * 0.25) + (df['Walks'] * 0.5) + (df['RBIs'] * 1.0) - (df['ERA_Plus'] * 0.5)
+    return df
 
 def save_game(player, hits, walks, rbis, hr, xbh, tb, era_plus):
     df = load_data()
@@ -37,12 +38,14 @@ def save_game(player, hits, walks, rbis, hr, xbh, tb, era_plus):
         
     game_date = datetime.now().strftime("%b %d, %Y")
     new_game = pd.DataFrame([[game_date, player, hits, walks, rbis, hr, xbh, tb, era_plus]], columns=df.columns)
-    df = pd.concat([df, new_game], ignore_index=True)
     
-    df.to_csv(DATA_FILE, index=False)
+    # Clean up any empty rows Google Sheets might have returned
+    df = df.dropna(how='all')
+    updated_df = pd.concat([df, new_game], ignore_index=True)
     
-    timestamp = datetime.now().strftime("%Y%m%d")
-    shutil.copy(DATA_FILE, f"backup_stats_{timestamp}.csv")
+    # Push the new data to the cloud!
+    conn.update(spreadsheet=SHEET_URL, data=updated_df)
+    st.cache_data.clear()
     st.success(f"Game logged successfully for {player}!")
 
 def filter_games(df, timeframe):
@@ -64,7 +67,6 @@ tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📝 Input Stats", "🏆 Standing
 with tab1:
     st.header("Log a New Game")
     with st.form("game_form", clear_on_submit=True):
-        # ---> IDIOT-PROOF DROPDOWN HERE <---
         player = st.selectbox("Player", ROSTER, index=None, placeholder="⚠️ SELECT A PLAYER ⚠️")
         
         col1, col2, col3, col4 = st.columns(4)
@@ -203,18 +205,15 @@ with tab5:
         </style>
         """, unsafe_allow_html=True)
         
-        # ---> NEW TIE-BREAKER LOGIC HERE <---
         def render_card(title, col_name, is_shame=False, fmt="{}", is_min=False):
             target_val = df[col_name].min() if is_min else df[col_name].max()
             tied_rows = df[df[col_name] == target_val]
             
-            # Find all players tied for the record
             tied_players = tied_rows['Player'].unique().tolist()
             player_str = ", ".join(tied_players)
             
             val_str = fmt.format(target_val)
             
-            # If multiple dates tied, label it "Multiple Occurrences"
             if len(tied_rows) == 1:
                 date_str = f"📅 {tied_rows['Date'].iloc[0]}"
             else:
@@ -236,16 +235,16 @@ with tab5:
         with col1:
             st.subheader("⭐ The Hall of Fame")
             render_card("Highest Single-Game WAR", 'Game WAR', fmt="{:.2f}")
-            render_card("Most Single Game Hits", 'Hits')
-            render_card("Most Single Game Home Runs", 'HR')
-            render_card("Most Single Game RBIs (The Clutch King)", 'RBIs')
-            render_card("Most Single Game Total Bases", 'TB')
+            render_card("Most Hits", 'Hits')
+            render_card("Most Home Runs", 'HR')
+            render_card("Most RBIs (The Clutch King)", 'RBIs')
+            render_card("Most Total Bases", 'TB')
 
         with col2:
             st.subheader("💀 The Hall of Shame")
             render_card("Worst Single-Game WAR", 'Game WAR', is_shame=True, fmt="{:.2f}", is_min=True)
-            render_card("Most Single Game Runs Allowed  (BP Pitcher)", 'ERA_Plus', is_shame=True, fmt="{:.1f}")
-            render_card("Most Single Game Walks", 'Walks', is_shame=True)
+            render_card("Most Runs Allowed (BP Pitcher)", 'ERA_Plus', is_shame=True, fmt="{:.1f}")
+            render_card("Most Walks", 'Walks', is_shame=True)
             
     else:
         st.info("Log a game to populate the league records!")
